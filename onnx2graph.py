@@ -1,92 +1,125 @@
 import onnx
 from onnx import numpy_helper
+import pygraphviz as pgv
 
-class _dict(dict):
-    """dict like object that exposes keys as attributes"""
-    def __getattr__(self, key):
-        ret = self.get(key)
-        if not ret and key.startswith("__"):
-            raise AttributeError()
-        return ret
-    def __setattr__(self, key, value):
-        self[key] = value
-    def __getstate__(self):
-        return self
-    def __setstate__(self, d):
-        self.update(d)
-    def update(self, d):
-        """update and return self -- the missing dict feature in python"""
-        super(_dict, self).update(d)
-        return self
-    def copy(self):
-        return _dict(dict(self).copy())
+from utils import _dict
 
 class ONNX2Graph:
     def __init__(self, filename):
         self.model = onnx.load(filename)
-        self.inputs = _dict()
+        self.graph = Graph(self.model.graph)
+
+class Graph:
+    def __init__(self, graph):
+        self.graph = graph
         self.nodes = _dict()
-        for node in self.model.graph.input:
-            self.inputs[node.name] = _dict({'shape': self.get_node_shape(node)})
-            self.nodes[node.name] = _dict({'shape': self.get_node_shape(node)})
-        self.outputs = {}
-        for node in self.model.graph.output:
-            self.outputs[node.name] = _dict({'shape': self.get_node_shape(node)})
-            self.nodes[node.name] = _dict({'shape': self.get_node_shape(node), 'output_blocks':[], 'op': 'Output'})
-
-        for node in self.model.graph.value_info:
-            self.nodes[node.name] = _dict({'shape': self.get_node_shape(node)})
-
-        self.constants = _dict()
         self.connections = _dict()
-        for node in self.model.graph.node:
-            if node.op_type == 'Constant':
-                self.constants[node.name] = self.get_constant_value(node)
-            if node.name not in self.nodes:
-                self.nodes[node.name] = _dict()
-            self.nodes[node.name].update({'op': node.op_type, 'input': node.input, 'output': node.output})
-            for i in node.input:
-                if i not in self.connections:
-                    self.connections[i] = _dict({'outputs': [], 'inputs': []})
-                self.connections[i].outputs.append(node.name)
-            for o in node.output:
-                if o not in self.connections:
-                    self.connections[o] = _dict({'outputs': [], 'inputs': []})
-                self.connections[o].inputs.append(node.name)
 
-        for node in self.model.graph.node:
-            #if node.op_type in ['Reshape', 'Add']:
-            #    continue
-            if node.op_type != 'Constant':
-                print(f'{node.op_type:<10}', end='')
-                for i in node.input:
-                    if i in self.inputs:
-                        print(f'{"x".join(str(d) for d in self.inputs[i]["shape"]):<10}', end='')
-                print(f'{node.output} {self.nodes[node.output[0]]} {node.input} self.nodes[node.input[0]]')
-                print('')
-            self.nodes[node.name].input_blocks = []
+        # update shape info
+        self.update_shape(self.graph.input, op='Input')
+        self.update_shape(self.graph.output, op='Output')
+        self.update_shape(self.graph.value_info)
+
+        self.update_nodes()
+        self.update_inout_blocks(self.graph.node)
+
+    def print_graph(self):
+        G = pgv.AGraph(directed=True)
+        to_nodes = ['Input73']
+        done_nodes = {}
+        template_table = '''<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0">{rows}</TABLE>>'''
+        template_header = '''<TR><TD BGCOLOR="grey">{name}</TD></TR>'''
+        template_row = '''<TR><TD ALIGN="left">{name}</TD></TR>'''
+        while to_nodes:
+            name = to_nodes[0]
+            done_nodes[to_nodes[0]] = True
+            node = self.nodes[to_nodes.pop(0)]
+            print(f'{node.op}({name})')
+
+            if 'output_blocks' not in node:
+                node.output_blocks = []
+            for out in node.output_blocks:
+                if out not in done_nodes:
+                    to_nodes.append(out)
+            if name in self.connections:
+                for out in self.connections[name].outputs:
+                    if out not in done_nodes:
+                        to_nodes.append(out)
+            if 'input' not in node:
+                node.input = []
+            inputs = []
             for i in node.input:
                 input = [i]
                 if i in self.connections and self.connections[i].inputs:
                     input = self.connections[i].inputs
-                self.nodes[node.name].input_blocks += input
-            self.nodes[node.name].output_blocks = []
+                inputs.append(template_row.format(name=f'In: {input[0]} ({self.nodes[i].shape})'))
+                print(f'   in: {input} {self.nodes[i].shape}')
+            if not node.output:
+                node.output = []
+            outputs = []
             for o in node.output:
                 output = [o]
                 if o in self.connections and self.connections[o].outputs:
                     output = self.connections[o].outputs
-                self.nodes[node.name].output_blocks += output
-        print('=======')
-        to_nodes = ['Block386']
+                outputs.append(template_row.format(name=f'Out:{output[0]} ({self.nodes[o].shape})'))
+                print(f'   out:{output} {self.nodes[o].shape}')
+            header = template_header.format(name=f'{node.op} ({name})')
+            rows = "\n".join([header] + inputs + outputs)
+            G.add_node(f'{name}', label=template_table.format(rows=rows), shape='plaintext')
+
+        all_nodes = done_nodes
+        # add edges
+        to_nodes = ['Input73']
+        done_nodes = {}
+        while to_nodes:
+            name = to_nodes[0]
+            done_nodes[to_nodes[0]] = True
+            node = self.nodes[to_nodes.pop(0)]
+
+            for out in node.output_blocks:
+                if out not in done_nodes:
+                    to_nodes.append(out)
+            if name in self.connections:
+                for out in self.connections[name].outputs:
+                    if out not in done_nodes:
+                        to_nodes.append(out)
+
+            for i in node.input:
+                input = [i]
+                if i in self.connections and self.connections[i].inputs:
+                    input = self.connections[i].inputs
+                if input[0] in all_nodes:
+                    G.add_edge(input[0], name)
+
+            outputs = []
+            for o in node.output:
+                output = [o]
+                if o in self.connections and self.connections[o].outputs:
+                    output = self.connections[o].outputs
+                if output[0] in all_nodes:
+                    G.add_edge(name, output[0])
+
+        G.layout(prog='dot')
+        G.write("mnist.dot")
+        G.draw("mnist.png")
+
+    def print_summary(self):
+        to_nodes = ['Input73']
         done_nodes = {}
         while to_nodes:
             name = to_nodes[0]
             done_nodes[to_nodes[0]] = True
             node = self.nodes[to_nodes.pop(0)]
             print(f'{node.op}({name})')
+            if 'output_blocks' not in node:
+                node.output_blocks = []
             for out in node.output_blocks:
                 if out not in done_nodes:
                     to_nodes.append(out)
+            if name in self.connections:
+                for out in self.connections[name].outputs:
+                    if out not in done_nodes:
+                        to_nodes.append(out)
             if 'input' not in node:
                 node.input = []
             for i in node.input:
@@ -102,19 +135,54 @@ class ONNX2Graph:
                     output = self.connections[o].outputs
                 print(f'   out:{output} {self.nodes[o].shape}')
 
+    def update_nodes(self):
+        for node in self.graph.node:
+            if node.name not in self.nodes:
+                self.nodes[node.name] = _dict(name=node.name)
+            self.nodes[node.name].update({'op': node.op_type, 'input': node.input, 'output': node.output})
+            for i in node.input:
+                if i not in self.connections:
+                    self.connections[i] = _dict({'outputs': [], 'inputs': []})
+                self.connections[i].outputs.append(node.name)
+            for o in node.output:
+                if o not in self.connections:
+                    self.connections[o] = _dict({'outputs': [], 'inputs': []})
+                self.connections[o].inputs.append(node.name)
+
+    def update_inout_blocks(self, nodes):
+        for node in nodes:
+            self.nodes[node.name].input_blocks = []
+            for i in node.input:
+                input = [i]
+                if i in self.connections and self.connections[i].inputs:
+                    input = self.connections[i].inputs
+                self.nodes[node.name].input_blocks += input
+            self.nodes[node.name].output_blocks = []
+            for o in node.output:
+                output = [o]
+                if o in self.connections and self.connections[o].outputs:
+                    output = self.connections[o].outputs
+                self.nodes[node.name].output_blocks += output
+
+    def update_shape(self, nodes, **kwargs):
+        for node in nodes:
+            if node.name not in self.nodes:
+                self.nodes[node.name] = _dict(name=node.name)
+            self.nodes[node.name].update(kwargs)
+            self.nodes[node.name].shape = self.get_node_shape(node)
 
     def get_node_shape(self, node):
         # get type of input tensor
         tensor_type = node.type.tensor_type
         # check if it has a shape:
         shape = []
-        if (tensor_type.HasField("shape")):
+        if tensor_type.HasField("shape"):
             # iterate through dimensions of the shape:
             for d in tensor_type.shape.dim:
                 # the dimension may have a definite (integer) value or a symbolic identifier or neither:
-                if (d.HasField("dim_value")):
+                if d.HasField("dim_value"):
                     shape.append(d.dim_value)
-                elif (d.HasField("dim_param")):
+                elif d.HasField("dim_param"):
                     # unknown dimension with symbolic name
                     shape.append(d.dim_param)
                 else:
@@ -130,7 +198,6 @@ class ONNX2Graph:
             return values[0]
         return values
 
-
-model = ONNX2Graph('mnist.onnx')
-#for node in model.graph.node:
-#  print(node.name, node.type)
+if __name__ == "__main__":
+    model = ONNX2Graph('mnist.onnx')
+    model.graph.print_graph()
