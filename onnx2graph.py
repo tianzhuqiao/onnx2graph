@@ -3,6 +3,7 @@ from onnx import numpy_helper
 import pygraphviz as pgv
 
 from utils import _dict
+from node import Node, InNode, OutNode, ValueNode
 
 class ONNX2Graph:
     def __init__(self, filename):
@@ -10,20 +11,20 @@ class ONNX2Graph:
         self.graph = Graph(self.model.graph)
 
 class Graph:
+    template_table = '''<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0">{rows}</TABLE>>'''
+    template_header = '''<TR><TD BGCOLOR="grey" ALIGN="left">{name}</TD></TR>'''
+    template_row = '''<TR><TD ALIGN="left">{name}</TD></TR>'''
+
     def __init__(self, graph):
         self.graph = graph
         self.nodes = _dict()
         self.connections = _dict()
 
-        # update shape info
-        self.update_shape(self.graph.input, op='Input')
-        self.update_shape(self.graph.output, op='Output')
-        self.update_shape(self.graph.value_info)
+        self.add_all_nodes()
 
         self.update_nodes()
         self.update_inout_blocks(self.graph.node)
 
-        self.update_attributes()
         self.cal_shapes()
 
     def get_all_nodes(self):
@@ -32,26 +33,8 @@ class Graph:
         inputs = [n.name for n in self.graph.input if n.name not in initializers]
 
         nodes = [n.name for n in self.graph.node if n.op_type != 'Constant']
-        output = [n.name for n in self.graph.output]
-        return inputs + nodes + output
-
-    def get_name(self, name):
-        if name.endswith('bias'):
-            return 'B'
-        elif name.endswith('weight'):
-            return 'W'
-        elif name.endswith('beta'):
-            return 'beta'
-        elif name.endswith('gamma'):
-            return 'gamma'
-        elif name.endswith('mean'):
-            return 'mean'
-        elif name.endswith('var'):
-            return 'var'
-        return name
-
-    def shape_str(self, shape):
-        return 'x'.join([str(d) for d in shape])
+        outputs = [f'{n.name}' for n in self.graph.output]
+        return (inputs + nodes + outputs, inputs, nodes, outputs)
 
     def cal_shapes(self):
         for node in self.graph.node:
@@ -70,7 +53,6 @@ class Graph:
                     weight = self.nodes[i].shape
                 else:
                     input = self.nodes[i].shape
-            attributes = self.nodes[node.name].attributes
             stride = attributes.strides
             padding = attributes.pads or [0, 0, 0, 0]
             kernal = attributes.kernel_shape
@@ -90,7 +72,6 @@ class Graph:
             for i in self.nodes[node.name].input:
                 input = self.nodes[i].shape
                 break
-            attributes = self.nodes[node.name].attributes
             kernel = attributes.kernel_shape
             pads = attributes.pads
             strides = attributes.strides
@@ -133,110 +114,120 @@ class Graph:
                 assert shape[-1] == s[0]
                 shape = shape[:-1] + s[1:]
             return shape
+        elif node.op_type in ['Gemm']:
+            inputs = self.nodes[node.name].input
+            A = self.get_shape(inputs[0])
+            B = self.get_shape(inputs[1])
+            #C = self.get_shape(inputs[2])
+            if attributes.transA:
+                A = [A[1], A[0]]
+            if attributes.transB:
+                B = [B[1], B[0]]
+            assert A[1] == B[0]
+            shape = [A[0], B[1]]
+            return shape
         return None
 
-    def update_attributes(self):
-        for node in self.graph.node:
-            self.get_attributes(node)
-
-    def get_attributes(self, node):
-        for attrib in node.attribute:
-            if "attributes" not in self.nodes[node.name]:
-                self.nodes[node.name]['attributes'] = _dict()
-            self.nodes[node.name]['attributes'][attrib.name] = self.get_attribute(attrib)
-
-    def get_attribute(self, attribute):
-        if attribute.type == onnx.AttributeProto.AttributeType.INTS:
-            return attribute.ints
-        elif attribute.type == onnx.AttributeProto.AttributeType.INT:
-            return attribute.i
-        elif attribute.type == onnx.AttributeProto.AttributeType.FLOAT:
-            return attribute.f
-        elif attribute.type == onnx.AttributeProto.AttributeType.TENSOR:
-            return numpy_helper.to_array(attribute.t)
-        elif attribute.type == onnx.AttributeProto.AttributeType.STRING:
-            return attribute.s
-
-        assert False
-        return None
-
-    def print_graph(self):
-
-        template_table = '''<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0">{rows}</TABLE>>'''
-        template_header = '''<TR><TD BGCOLOR="grey" ALIGN="left">{name}</TD></TR>'''
-        template_row = '''<TR><TD ALIGN="left">{name}</TD></TR>'''
-
-        G = pgv.AGraph(directed=True)
-
-        all_nodes = self.get_all_nodes()
-        for nd in self.get_all_nodes():
+    def print_input_node(self, G):
+        initializers = [n.name for n in self.graph.initializer]
+        # get the "required" inputs
+        inputs = [n.name for n in self.graph.input if n.name not in initializers]
+        for nd in inputs:
             name = nd
             node = self.nodes[name]
             print(f'{node.op}({name})')
 
-            if 'output_blocks' not in node:
-                node.output_blocks = []
-            if 'input' not in node:
-                node.input = []
+            header = self.template_header.format(name=f'{node.op}')
+            rows = "\n".join([header])
+            G.add_node(f'i-{name}', label=self.template_table.format(rows=rows), shape='plaintext')
+
+    def print_output_node(self, G):
+        outputs = [n.name for n in self.graph.output]
+        for nd in outputs:
+            name = nd
+            node = self.nodes[name]
+            print(f'{node.op}({name})')
+
+            header = self.template_header.format(name=f'{node.op}')
+            rows = "\n".join([header])
+            G.add_node(f'o-{name}', label=self.template_table.format(rows=rows), shape='plaintext')
+
+    def print_nodes(self, G):
+        all_nodes, _, nodes, _ = self.get_all_nodes()
+        for nd in nodes:
+            name = nd
+            node = self.nodes[name]
+            print(f'{node.op}({name})')
+
             inputs = []
             for i in node.input:
                 input = [i]
                 if i in self.connections and self.connections[i].inputs:
                     input = self.connections[i].inputs
                 if input[0] not in all_nodes:
-                    in_name = self.get_name(input[0])
+                    # not node, may be constant/values/weights ...
+                    in_name = self.nodes[input[0]].name
                     if self.nodes[i].op == "Constant":
                         if in_name == input[0]:
                             in_name = "C"
-                    inputs.append(template_row.format(name=f'<b>{in_name}</b> &lt;{self.shape_str(self.nodes[i].shape)}&gt;'))
+                    inputs.append(self.template_row.format(name=f'<b>{in_name}</b> &lt;{self.nodes[i].shape_str}&gt;'))
                 print(f'   in: {input} {self.nodes[i].shape}')
-            if not node.output:
-                node.output = []
+
             outputs = []
             for o in node.output:
                 output = [o]
                 if o in self.connections and self.connections[o].outputs:
                     output = self.connections[o].outputs
                 if output[0] not in all_nodes:
-                    outputs.append(template_row.format(name=f'Out:{self.get_name(output[0])} ({self.shape_str(self.nodes[o].shape)})'))
+                    out_name = self.nodes[output[0]].name
+                    outputs.append(self.template_row.format(name=f'Out:{out_name} ({self.nodes[o].shape_str})'))
                 print(f'   out:{output} {self.nodes[o].shape}')
-            header = template_header.format(name=f'{node.op}')
+            header = self.template_header.format(name=f'{node.op}')
             rows = "\n".join([header] + inputs + outputs)
-            G.add_node(f'{name}', label=template_table.format(rows=rows), shape='plaintext')
+            G.add_node(f'{name}', label=self.template_table.format(rows=rows), shape='plaintext')
 
+    def print_edge(self, G):
         # add edges
-        for nd in self.get_all_nodes():
+        all_nodes, all_inputs, nodes, all_outputs = self.get_all_nodes()
+        for nd in nodes:
             name = nd
             node = self.nodes[name]
 
-            if 'output_blocks' not in node:
-                node.output_blocks = []
-
-            if 'input' not in node:
-                node.input = []
             for i in node.input:
                 input = [i]
                 if i in self.connections and self.connections[i].inputs:
                     input = self.connections[i].inputs
                 if input[0] in all_nodes:
-
+                    in_name = input[0]
+                    if in_name in all_inputs:
+                        in_name = f'i-{input[0]}'
                     if self.nodes[input[0]].shape:
-                        G.add_edge(input[0], name, label=self.shape_str(self.nodes[input[0]].shape))
+                        G.add_edge(in_name, name, label=self.nodes[input[0]].shape_str)
                     else:
-                        G.add_edge(input[0], name)
+                        G.add_edge(in_name, name)
 
-            if not node.output:
-                node.output = []
-            outputs = []
             for o in node.output:
                 output = [o]
                 if o in self.connections and self.connections[o].outputs:
                     output = self.connections[o].outputs
                 if output[0] in all_nodes:
+                    if ((output[0] not in nodes) or (output[0] == name)) and (output[0] in all_outputs):
+                        # some onnx may have same name in graph.output and graph.node
+                        output[0] = f'o-{output[0]}'
                     if node.shape:
-                        G.add_edge(name, output[0], label=self.shape_str(node.shape))
+                        G.add_edge(name, output[0], label=node.shape_str)
                     else:
                         G.add_edge(name, output[0])
+
+    def print_graph(self):
+        G = pgv.AGraph(directed=True)
+
+        # print nodes
+        self.print_input_node(G)
+        self.print_nodes(G)
+        self.print_output_node(G)
+
+        self.print_edge(G)
 
         G.layout(prog='dot')
         G.write("mnist.dot")
@@ -276,9 +267,7 @@ class Graph:
 
     def update_nodes(self):
         for node in self.graph.node:
-            if node.name not in self.nodes:
-                self.nodes[node.name] = _dict(name=node.name)
-            self.nodes[node.name].update({'op': node.op_type, 'input': node.input, 'output': node.output})
+            assert node.name in self.nodes
             for i in node.input:
                 if i not in self.connections:
                     self.connections[i] = _dict({'outputs': [], 'inputs': []})
@@ -290,48 +279,47 @@ class Graph:
 
     def update_inout_blocks(self, nodes):
         for node in nodes:
-            self.nodes[node.name].input_blocks = []
             for i in node.input:
                 input = [i]
                 if i in self.connections and self.connections[i].inputs:
                     input = self.connections[i].inputs
                 self.nodes[node.name].input_blocks += input
-            self.nodes[node.name].output_blocks = []
             for o in node.output:
                 output = [o]
                 if o in self.connections and self.connections[o].outputs:
                     output = self.connections[o].outputs
                 self.nodes[node.name].output_blocks += output
 
-    def update_shape(self, nodes, **kwargs):
-        for node in nodes:
-            if node.name not in self.nodes:
-                self.nodes[node.name] = _dict(name=node.name)
-            self.nodes[node.name].update(kwargs)
-            self.nodes[node.name].shape = self.get_node_shape(node)
+    def add_node(self, node, ntype):
+        nd = None
+        if ntype == "input":
+            nd = InNode(node)
+        elif ntype == "output":
+            nd = OutNode(node)
+        elif ntype == "value_info":
+            nd = ValueNode(node)
+        else:
+            nd = Node(node)
+        if node.name in self.nodes:
+            self.nodes[node.name].shape = nd.shape
+        else:
+            self.nodes[node.name] = nd
+
+    def add_all_nodes(self):
+        # list all input, output and node from the graph
+        def add_nodes(nodes, ntype=''):
+            for node in nodes:
+                self.add_node(node, ntype)
+        add_nodes(self.graph.input, 'input')
+        add_nodes(self.graph.node)
+        add_nodes(self.graph.output, 'output')
+        add_nodes(self.graph.value_info, 'value_info')
+
     def get_shape(self, name):
         shape = self.nodes[name].shape
         if not shape and name in self.connections:
             input = self.connections[name]['inputs'][0]
             shape = self.nodes[input].shape
-        return shape
-
-    def get_node_shape(self, node):
-        # get type of input tensor
-        tensor_type = node.type.tensor_type
-        # check if it has a shape:
-        shape = []
-        if tensor_type.HasField("shape"):
-            # iterate through dimensions of the shape:
-            for d in tensor_type.shape.dim:
-                # the dimension may have a definite (integer) value or a symbolic identifier or neither:
-                if d.HasField("dim_value"):
-                    shape.append(d.dim_value)
-                elif d.HasField("dim_param"):
-                    # unknown dimension with symbolic name
-                    shape.append(d.dim_param)
-                else:
-                    shape.append('?')
         return shape
 
     def get_constant_value(self, const):
@@ -344,6 +332,6 @@ class Graph:
         return values
 
 if __name__ == "__main__":
-    model = ONNX2Graph('resnet18-v1-7.onnx')
-    #model = ONNX2Graph('mnist.onnx')
+    #model = ONNX2Graph('resnet18-v1-7.onnx')
+    model = ONNX2Graph('mnist.onnx')
     model.graph.print_graph()
