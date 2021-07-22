@@ -1,3 +1,5 @@
+import math
+import numpy as np
 import onnx
 from onnx import numpy_helper
 import pygraphviz as pgv
@@ -25,8 +27,6 @@ class Graph:
         self.update_nodes()
         self.update_inout_blocks(self.graph.node)
 
-        self.cal_shapes()
-
     def get_all_nodes(self):
         initializers = [n.name for n in self.graph.initializer]
         # get the "required" inputs
@@ -35,98 +35,6 @@ class Graph:
         nodes = [n.name for n in self.graph.node if n.op_type != 'Constant']
         outputs = [f'{n.name}' for n in self.graph.output]
         return (inputs + nodes + outputs, inputs, nodes, outputs)
-
-    def cal_shapes(self):
-        for node in self.graph.node:
-            if self.nodes[node.name].shape is None:
-                shape = self.calc_shape(node)
-                if shape is not None:
-                    self.nodes[node.name].shape = shape
-
-    def calc_shape(self, node):
-        attributes = self.nodes[node.name].attributes
-        if node.op_type == "Conv":
-            weight = None
-            input = None
-            for i in self.nodes[node.name].input:
-                if i.endswith('weight') or self.nodes[i].op == 'Constant':
-                    weight = self.nodes[i].shape
-                else:
-                    input = self.nodes[i].shape
-            stride = attributes.strides
-            padding = attributes.pads or [0, 0, 0, 0]
-            kernal = attributes.kernel_shape
-            shape = [0]*(len(kernal))
-            for i in range(len(kernal)):
-                shape[i] = int((input[2+i] - kernal[i] + padding[2*i] + padding[2*i+1])/stride[i]+1)
-            return [input[0], weight[0]] + shape
-        elif node.op_type in ['BatchNormalization', 'Relu', 'Div', 'Add']:
-            input = None
-            for i in self.nodes[node.name].input:
-                input = self.nodes[i].shape
-                break
-            if input:
-                return input
-        elif node.op_type in ['MaxPool']:
-            input = None
-            for i in self.nodes[node.name].input:
-                input = self.nodes[i].shape
-                break
-            kernel = attributes.kernel_shape
-            pads = attributes.pads
-            strides = attributes.strides
-            shape = [0]*len(kernel)
-            for i in range(len(kernel)):
-                shape[i] = int((input[2+i] - kernel[i] + pads[2*i] + pads[2*i+1])/strides[i] + 1)
-            return input[0:2] + shape
-        elif node.op_type in ['Add']:
-            shape = None
-            for i in self.nodes[node.name].input:
-                if shape is None:
-                    shape = self.nodes[i].shape
-                    continue
-                assert shape == self.nodes[i].shape
-            return shape
-        elif node.op_type in ['GlobalAveragePool']:
-            input = None
-            for i in self.nodes[node.name].input:
-                input = self.nodes[i].shape
-                break
-            shape = list(input)
-            shape[-2:] = [1, 1]
-            return shape
-        elif node.op_type in ['Flatten']:
-            input = None
-            for i in self.nodes[node.name].input:
-                input = self.nodes[i].shape
-                break
-            return input[:-2]
-        elif node.op_type in ['Reshape']:
-            shape = attributes.shape
-            return shape
-        elif node.op_type in ['MatMul']:
-            shape = None
-            for i in self.nodes[node.name].input:
-                s = self.get_shape(i)
-                if shape is None:
-                    shape = self.get_shape(i)
-                    continue
-                assert shape[-1] == s[0]
-                shape = shape[:-1] + s[1:]
-            return shape
-        elif node.op_type in ['Gemm']:
-            inputs = self.nodes[node.name].input
-            A = self.get_shape(inputs[0])
-            B = self.get_shape(inputs[1])
-            #C = self.get_shape(inputs[2])
-            if attributes.transA:
-                A = [A[1], A[0]]
-            if attributes.transB:
-                B = [B[1], B[0]]
-            assert A[1] == B[0]
-            shape = [A[0], B[1]]
-            return shape
-        return None
 
     def print_input_node(self, G):
         initializers = [n.name for n in self.graph.initializer]
@@ -279,16 +187,22 @@ class Graph:
 
     def update_inout_blocks(self, nodes):
         for node in nodes:
+            input_nodes = []
             for i in node.input:
                 input = [i]
                 if i in self.connections and self.connections[i].inputs:
                     input = self.connections[i].inputs
                 self.nodes[node.name].input_blocks += input
+                input_nodes.append(self.nodes[i])
+            self.nodes[node.name].input_nodes = input_nodes
+            output_nodes = []
             for o in node.output:
                 output = [o]
                 if o in self.connections and self.connections[o].outputs:
                     output = self.connections[o].outputs
                 self.nodes[node.name].output_blocks += output
+                output_nodes.append(self.nodes[o])
+            self.nodes[node.name].output_nodes = output_nodes
 
     def add_node(self, node, ntype):
         nd = None
@@ -320,7 +234,7 @@ class Graph:
         if not shape and name in self.connections:
             input = self.connections[name]['inputs'][0]
             shape = self.nodes[input].shape
-        return shape
+        return list(shape)
 
     def get_constant_value(self, const):
         values = []
