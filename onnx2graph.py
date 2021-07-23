@@ -1,4 +1,5 @@
 import math
+import html
 import numpy as np
 import onnx
 from onnx import numpy_helper
@@ -68,18 +69,16 @@ class Graph:
             print(f'{node.op}({name})')
 
             inputs = []
-            for i in node.input:
+            for idx, i in enumerate(node.input):
                 input = [i]
+                label = node.input_label(idx)
+                notes = node.input_notes(idx)
                 if i in self.connections and self.connections[i].inputs:
                     input = self.connections[i].inputs
                 if input[0] not in all_nodes:
                     # not node, may be constant/values/weights ...
-                    in_name = self.nodes[input[0]].name
-                    if self.nodes[i].op == "Constant":
-                        if in_name == input[0]:
-                            in_name = "C"
-                    inputs.append(self.template_row.format(name=f'<b>{in_name}</b> &lt;{self.nodes[i].shape_str}&gt;'))
-                print(f'   in: {input} {self.nodes[i].shape}')
+                    inputs.append(self.template_row.format(name=f'<b>{html.escape(label)}</b> {html.escape(notes)}'))
+                print(f'   in: {label} {self.nodes[i].shape}')
 
             outputs = []
             for o in node.output:
@@ -215,6 +214,7 @@ class Graph:
         else:
             nd = Node(node)
         if node.name in self.nodes:
+            #if self.nodes[node.name].shape is None:
             self.nodes[node.name].shape = nd.shape
         else:
             self.nodes[node.name] = nd
@@ -246,6 +246,6 @@ class Graph:
         return values
 
 if __name__ == "__main__":
-    #model = ONNX2Graph('resnet18-v1-7.onnx')
-    model = ONNX2Graph('mnist.onnx')
+    model = ONNX2Graph('resnet18-v1-7.onnx')
+    #model = ONNX2Graph('mnist.onnx')
     model.graph.print_graph()
