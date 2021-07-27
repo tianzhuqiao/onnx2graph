@@ -155,7 +155,7 @@ class Node(BaseNode):
         assert False
         return None
 
-    def deduce_shape(self):
+    def deduce_shape(self, index=0):
         attributes = self.attributes
         inputs = [list(input.shape) for input in self.input_nodes]
         shape = None
@@ -192,7 +192,8 @@ class Node(BaseNode):
                 shape = [X[0], W[0]*group] + shape
         elif op in ['BatchNormalization', 'Relu', 'Abs', 'Acos', 'Acosh', 'Asin',
                     'Asinh', 'Atan', 'Atanh', 'Cast', 'CastLike', 'Ceil', 'Celu',
-                    'Clip', 'Cos', 'Cosh', 'CumSum']:
+                    'Clip', 'Cos', 'Cosh', 'CumSum', 'DequantizeLinear', 'Dropout',
+                    'Elu', 'Erf', 'Exp', 'EyeLike', 'Floor']:
             shape = inputs[0]
         elif op in ['MaxPool', 'AveragePool']:
             input = inputs[0]
@@ -291,7 +292,32 @@ class Node(BaseNode):
             for v in ['value_floats', 'value_ints', 'value_strings']:
                 if v in attributes:
                     shape = [len(attributes[v])]
-        elif op in ['ConstantOfShape']:
-            shape = inputs[0]
+        elif op in ['DepthToSpace']:
+            X = inputs[0]
+            blocksize = attributes.blocksize
+            shape = list(X)
+            shape[1] = shape[1]//(blocksize**2)
+            shape[2] *= blocksize
+            shape[3] *= blocksize
+        elif op in ['Det']:
+            X = inputs[0]
+            shape = X[:-2]
+        elif op in ['Gru']:
+            X = inputs[0]
+            W = inputs[1]
+            if index == 0:
+                shape = [X[0], W[0], X[1], W[1]/3]
+            elif index == 1:
+                shape = [W[0], X[1], W[1]/3]
+        elif op in ['Gather']:
+            axis = attributes.axis or 0
+            data = inputs[0]
+            indices = inputs[1]
 
+            shape = data[:axis] + data[axis+1:] + indices
+        elif op in ['GatherElements']:
+            indices = inputs[1]
+            shape = indices
+        elif op in ['GatherND']:
+            pass
         self._shape = shape

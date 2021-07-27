@@ -1,17 +1,10 @@
-import math
-import html
 import numpy as np
-import onnx
+import html
 from onnx import numpy_helper
 import pygraphviz as pgv
 
 from utils import _dict
 from node import Node, InNode, OutNode, ValueNode
-
-class ONNX2Graph:
-    def __init__(self, filename):
-        self.model = onnx.load(filename)
-        self.graph = Graph(self.model.graph)
 
 class Graph:
     template_table = '''<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0">{rows}</TABLE>>'''
@@ -244,8 +237,3 @@ class Graph:
         if len(values) == 1:
             return values[0]
         return values
-
-if __name__ == "__main__":
-    model = ONNX2Graph('resnet18-v1-7.onnx')
-    #model = ONNX2Graph('mnist.onnx')
-    model.graph.print_graph()
