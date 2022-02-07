@@ -1,11 +1,13 @@
 **onnx2graph** is tool to visualize [onnx](https://onnx.ai/) model with [Graphviz](https://graphviz.org/), for example, to export a model to png, svg, pdf, etc.
 
 ### install
-```
-$ git clone https://github.com/tianzhuqiao/onnx2graph.git
-$ cd onnx2graph
-$ pip install -e .
-```
+1. [install Graphviz](https://github.com/pygraphviz/pygraphviz/blob/main/INSTALL.txt)
+2. install this package
+    ```
+    $ git clone https://github.com/tianzhuqiao/onnx2graph.git
+    $ cd onnx2graph
+    $ pip install -e .
+    ```
 ### usage
 ```
 $ onnx2graph --help
