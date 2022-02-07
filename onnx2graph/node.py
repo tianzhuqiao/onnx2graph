@@ -3,7 +3,7 @@ import numpy as np
 import onnx
 from onnx import numpy_helper
 from onnx import defs
-from utils import _dict
+from .utils import _dict
 
 schemas = _dict()
 for schema in defs.get_all_schemas_with_history():
@@ -14,6 +14,7 @@ for schema in defs.get_all_schemas_with_history():
 
 
 class BaseNode:
+    op_version = 1
     def __init__(self, node):
         self.node = node
         self.input = []
@@ -112,17 +113,32 @@ class Node(BaseNode):
         op = schemas.get(self.op, None)
         if not op:
             return self.input[index]
-        return op[0].inputs[index].name
+        if len(op) > 1:
+            # find the right version for the operator in onnx
+            cop = None
+            for o in op:
+                if o.since_version == Node.op_version:
+                    cop = o
+                    break
+                if o.since_version > Node.op_version:
+                    if not cop:
+                        cop = o
+                    elif cop.since_version > o.since_version:
+                        cop = o
+
+            schemas[self.op] = [cop]
+        return op[-1].inputs[index].name
 
     def input_notes(self, index):
-        if self.shape is not None:
-            if self.shape:
-                return f'<{self.shape_str}>'
-            if self.op == 'Constant':
+        node = self.input_nodes[index]
+        if node.shape is not None:
+            if node.shape:
+                return f'<{node.shape_str}>'
+            if node.op == 'Constant':
                 value = None
                 for v in ['value', 'value_float', 'value_int', 'value_string']:
-                    if v in self.attributes:
-                        value = self.attributes[v]
+                    if v in node.attributes:
+                        value = node.attributes[v]
                         break
                 return f'({value})'
         return ''
@@ -157,7 +173,13 @@ class Node(BaseNode):
 
     def deduce_shape(self, index=0):
         attributes = self.attributes
+        for input in self.input_nodes:
+            if input is None or input.shape is None:
+                return None
+
         inputs = [list(input.shape) for input in self.input_nodes]
+        if None in inputs:
+            return None
         shape = None
         op = self.op
         if op in ["Conv", 'ConvInteger']:
@@ -193,9 +215,11 @@ class Node(BaseNode):
         elif op in ['BatchNormalization', 'Relu', 'Abs', 'Acos', 'Acosh', 'Asin',
                     'Asinh', 'Atan', 'Atanh', 'Cast', 'CastLike', 'Ceil', 'Celu',
                     'Clip', 'Cos', 'Cosh', 'CumSum', 'DequantizeLinear', 'Dropout',
-                    'Elu', 'Erf', 'Exp', 'EyeLike', 'Floor']:
+                    'Elu', 'Erf', 'Exp', 'EyeLike', 'Floor', 'Less', 'LessOrEqual',
+                    'Log', 'LRN', 'LogSoftmax', 'LpNormalization', 'MeanVarianceNormalization',
+                    'Mod', 'Neg', 'Pow', 'Softmax', ]:
             shape = inputs[0]
-        elif op in ['MaxPool', 'AveragePool']:
+        elif op in ['MaxPool', 'AveragePool', 'LpPool']:
             input = inputs[0]
             kernel = attributes.kernel_shape
             pads = attributes.pads
@@ -211,7 +235,8 @@ class Node(BaseNode):
                 else:
                     shape[i] = math.floor(sz)
             shape = input[0:2] + shape
-        elif op in ['Add', 'And', 'Div', 'Equal', 'Greater', 'Less', 'Max', 'Mean', 'Min', 'Mul', 'Or', 'Pow', 'Sub', 'Sum', 'Xor', 'BitShift']:
+        elif op in ['Add', 'And', 'Div', 'Equal', 'Greater', 'Less', 'Max', 'Mean', 'Min', 'Mul',
+                    'Or', 'Pow', 'Sub', 'Sum', 'Xor', 'BitShift']:
             A = inputs[0]
             B = inputs[1]
             if len(A) < len(B):
@@ -233,8 +258,16 @@ class Node(BaseNode):
                 axis = 1
             shape = [np.prod(input[:axis-1]).astype(int), np.prod(input[axis:]).astype(int)]
         elif op in ['Reshape']:
-            shape = list(attributes.shape)
-        elif op in ['MatMul']:
+            if attributes.shape:
+                # version 1
+                shape = list(attributes.shape)
+            else:
+                data = inputs[0]
+                shape = list(self.input_nodes[1].values)
+                if -1 in shape:
+                    idx = shape.index(-1)
+                    shape[idx] = np.prod(data).astype(int) / np.prod(shape).astype(int)
+        elif op in ['MatMul', 'MatMulInteger']:
             A = inputs[0]
             B = inputs[1]
             A_P = []
@@ -320,4 +353,15 @@ class Node(BaseNode):
             shape = indices
         elif op in ['GatherND']:
             pass
+        elif op in ['MaxRoiPool']:
+            pooled_shape = attributes.pooled_shape
+            X = inputs[0]
+            rois = inputs[1]
+            shape = [rois[0], X[1], pooled_shape[0], pooled_shape[1]]
+        elif op in ['MacUnpool']:
+            pass
+        elif op in ['Multinomial']:
+            sample_size = attributes.sample_size or 1
+            input = inputs[1]
+            shape = [input[0], sample_size]
         self._shape = shape
